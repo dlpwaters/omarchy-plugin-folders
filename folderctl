@@ -450,6 +450,118 @@ def operation_unassign(args: argparse.Namespace) -> dict[str, Any]:
     return mutate(apply)
 
 
+def operation_set_members(args: argparse.Namespace) -> dict[str, Any]:
+    """Atomically make a folder contain exactly the requested plugin IDs."""
+
+    requested = []
+    seen: set[str] = set()
+    for raw_plugin_id in args.plugin_ids:
+        plugin_id = str(raw_plugin_id).strip()
+        if not plugin_id or plugin_id in seen:
+            continue
+        requested.append(plugin_id)
+        seen.add(plugin_id)
+
+    def apply(config: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        folder = find_folder(state, args.folder_id)
+        current = {
+            str(member.get("id", "")): member for member in folder.get("members", [])
+        }
+        assigned = all_members(state)
+        manifests = scan_manifests()
+
+        # Validate the complete request before changing either document. A bad
+        # plugin can therefore never leave a half-applied multi-selection.
+        addition_ids = []
+        for plugin_id in requested:
+            if plugin_id in current:
+                continue
+            if is_protected(plugin_id):
+                raise FolderError(f"{plugin_id} is a protected structural widget")
+            existing = assigned.get(plugin_id)
+            if existing and existing != args.folder_id:
+                raise FolderError(f"{plugin_id} is already assigned to {existing}")
+            location = find_bar_entry(config, plugin_id)
+            if not location:
+                raise FolderError(f"{plugin_id} is not currently on the bar")
+            manifest = manifests.get(plugin_id)
+            kinds = manifest.get("kinds", []) if isinstance(manifest, dict) else []
+            if "bar-widget" not in kinds:
+                raise FolderError(f"{plugin_id} does not provide a bar widget")
+            addition_ids.append(plugin_id)
+
+        removal_ids = set(current) - seen
+        indexed_removals = [
+            (index, member) for index, member in enumerate(folder.get("members", []))
+            if str(member.get("id", "")) in removal_ids
+        ]
+        indexed_removals.sort(
+            key=lambda pair: (
+                SECTIONS.index(pair[1].get("section", "left")),
+                int(pair[1].get("index", 0)),
+                pair[0],
+            ),
+            reverse=True,
+        )
+        removals = [member for _index, member in indexed_removals]
+        for member in removals:
+            restore_member(config, member)
+
+        folder["members"] = [
+            member for member in folder.get("members", [])
+            if str(member.get("id", "")) not in removal_ids
+        ]
+
+        # Snapshot every new member before removing any of them. This keeps
+        # adjacent plugins' true indices and neighbours instead of recording
+        # successively shifted positions.
+        additions = []
+        for plugin_id in addition_ids:
+            location = find_bar_entry(config, plugin_id)
+            if not location:  # Defensive: validation above should guarantee it.
+                raise FolderError(f"{plugin_id} is not currently on the bar")
+            entries = config["bar"]["layout"][location["section"]]
+            index = int(location["index"])
+            keep_alive_added = plugin_entry_index(config, plugin_id) < 0
+            additions.append(
+                {
+                    "id": plugin_id,
+                    "name": display_name(manifests, plugin_id),
+                    "entry": copy.deepcopy(location["entry"]),
+                    "section": location["section"],
+                    "index": index,
+                    "beforeId": entry_id(entries[index - 1]) if index > 0 else "",
+                    "afterId": entry_id(entries[index + 1]) if index + 1 < len(entries) else "",
+                    "keepAliveAdded": keep_alive_added,
+                }
+            )
+            if keep_alive_added:
+                config["plugins"].append({"id": plugin_id})
+
+        for member in sorted(
+            additions,
+            key=lambda item: (SECTIONS.index(item["section"]), int(item["index"])),
+            reverse=True,
+        ):
+            entries = config["bar"]["layout"][member["section"]]
+            entries.pop(int(member["index"]))
+
+        additions.sort(
+            key=lambda item: (SECTIONS.index(item["section"]), int(item["index"]))
+        )
+        folder["members"].extend(additions)
+        added = [str(member["id"]) for member in additions]
+
+        return {
+            "folderId": args.folder_id,
+            "added": added,
+            "removed": [str(member.get("id", "")) for member in removals],
+            "members": [str(member.get("id", "")) for member in folder["members"]],
+        }
+
+    return mutate(apply)
+
+
 def operation_reorder(args: argparse.Namespace) -> dict[str, Any]:
     def apply(config: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         del config
@@ -471,11 +583,16 @@ def operation_reorder(args: argparse.Namespace) -> dict[str, Any]:
 def operation_delete(args: argparse.Namespace) -> dict[str, Any]:
     def apply(config: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         folder = find_folder(state, args.folder_id)
-        members = sorted(
-            folder["members"],
-            key=lambda item: (SECTIONS.index(item.get("section", "left")), int(item.get("index", 0))),
+        indexed_members = list(enumerate(folder["members"]))
+        indexed_members.sort(
+            key=lambda pair: (
+                SECTIONS.index(pair[1].get("section", "left")),
+                int(pair[1].get("index", 0)),
+                pair[0],
+            ),
+            reverse=True,
         )
-        for member in members:
+        for _index, member in indexed_members:
             restore_member(config, member)
         remove_folder_entry(config, args.folder_id)
         state["folders"] = [item for item in state["folders"] if item.get("id") != args.folder_id]
@@ -490,10 +607,16 @@ def operation_restore_all(_args: argparse.Namespace) -> dict[str, Any]:
         members = []
         for folder in state["folders"]:
             members.extend(folder.get("members", []))
-        members.sort(
-            key=lambda item: (SECTIONS.index(item.get("section", "left")), int(item.get("index", 0)))
+        indexed_members = list(enumerate(members))
+        indexed_members.sort(
+            key=lambda pair: (
+                SECTIONS.index(pair[1].get("section", "left")),
+                int(pair[1].get("index", 0)),
+                pair[0],
+            ),
+            reverse=True,
         )
-        for member in members:
+        for _index, member in indexed_members:
             restore_member(config, member)
             restored.append(member["id"])
         for section in SECTIONS:
@@ -607,6 +730,11 @@ def build_parser() -> argparse.ArgumentParser:
     unassign.add_argument("folder_id")
     unassign.add_argument("plugin_id")
     unassign.set_defaults(handler=operation_unassign)
+
+    set_members = sub.add_parser("set-members")
+    set_members.add_argument("folder_id")
+    set_members.add_argument("plugin_ids", nargs="*")
+    set_members.set_defaults(handler=operation_set_members)
 
     reorder = sub.add_parser("reorder")
     reorder.add_argument("folder_id")

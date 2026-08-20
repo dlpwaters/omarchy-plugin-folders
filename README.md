@@ -1,20 +1,32 @@
-# Plugin Folders for Omarchy
+<div align="center">
 
-Declutter a busy Omarchy top bar without disabling the plugins you use. Each
-folder is a compact, customizable bar icon that opens a launcher containing the
-real native widgets assigned to it.
+# 📁 Plugin Folders
 
-## Highlights
+### Fold the clutter. Keep every plugin one click away.
 
-- Create as many folders as you need.
-- Choose from 12 icons and 10 accent colors.
-- Search the eligible plugins currently on your bar.
-- Preserve each plugin's native click behavior, panel, service, and settings.
-- Restore the exact saved section, nearby position, and complete bar entry when
-  a plugin leaves a folder.
-- Delete a folder safely: every member returns to the bar automatically.
-- Keep structural Omarchy widgets protected from accidental hiding.
-- Store everything locally with no account, network service, or telemetry.
+Turn a crowded Omarchy top bar into a small set of colorful launcher folders—without sacrificing native plugin windows, settings, or behavior.
+
+[![Omarchy Quattro](https://img.shields.io/badge/Omarchy-Quattro-e0af68?style=for-the-badge)](https://omarchy.org/)
+[![Version 1.1.0](https://img.shields.io/badge/version-1.1.0-7aa2f7?style=for-the-badge)](https://github.com/dlpwaters/omarchy-plugin-folders)
+[![Local First](https://img.shields.io/badge/local--first-no%20telemetry-9ece6a?style=for-the-badge)](#privacy-and-safety)
+[![MIT License](https://img.shields.io/badge/license-MIT-bb9af7?style=for-the-badge)](LICENSE)
+
+<img src="preview.png" alt="Plugin Folders launcher showing seven organized Omarchy plugins" width="660">
+
+</div>
+
+## One folder instead of seven bar icons
+
+Plugin Folders gives you repeatable, color-coded launchers for the plugins you already use. Open a folder, choose a plugin, and its normal panel or one-click action runs exactly as it would from the bar.
+
+- Create as many independent folders as you need.
+- Choose from 12 expressive icons and 10 accent colors.
+- Select several plugins and apply the whole change at once.
+- Search, select all visible results, or clear them in one click.
+- Preserve native popups, action widgets, services, timers, and inline settings.
+- Restore the original section, nearby position, and complete bar entry.
+- Delete a folder safely—every member returns to the bar automatically.
+- Keep Omarchy structural widgets protected from accidental hiding.
 
 ## Install
 
@@ -24,58 +36,78 @@ omarchy plugin add https://github.com/dlpwaters/omarchy-plugin-folders.git --ena
 omarchy restart shell
 ```
 
-Click the new **Plugins** folder beside the workspace switcher, open **Manage**,
-and choose the plugins you want to move inside it. Use **New folder** to add
-another independently styled folder to the bar. Right-click any folder icon to
-jump directly into its organizer.
+The first folder appears beside the workspace switcher. Click it, open **Manage**, select the plugins you want inside, then choose **Apply**.
 
-## How it works
+Right-click a folder icon to jump directly into its organizer. Use **New folder** to add another launcher with its own name, icon, color, and members.
 
-Assigning a plugin removes only its standalone bar entry. Plugin Folders keeps
-the plugin enabled and mounts its real `BarWidget.qml` component inside the
-folder, including its original inline settings. The saved state also records
-its section, index, and neighboring widgets for reliable restoration even if
-the rest of the bar changes later.
+## What happens to a plugin?
 
-State lives at:
+| When added to a folder | When removed from a folder |
+| --- | --- |
+| Its standalone bar icon is removed. | Its complete saved bar entry returns. |
+| Its native `BarWidget.qml` stays alive under the folder icon. | Temporary keepalive state is removed. |
+| A folder tile forwards the plugin's normal left click. | Its original settings and relative position are preserved. |
+| Its own panel, action, IPC, timers, and services keep working. | No plugin data is deleted or reset. |
 
-```text
-${XDG_STATE_HOME:-~/.local/state}/omarchy-plugin-folders/state.json
+Batch changes are validated before either state file is written. If one selected plugin is invalid, the entire operation is rejected instead of leaving a half-updated folder.
+
+## Update
+
+```bash
+omarchy plugin update io.github.dlpwaters.plugin-folders --yes
+omarchy restart shell
 ```
 
-The helper keeps a last-operation safety copy beside `shell.json` as
-`shell.json.plugin-folders.bak`.
+## Remove safely
 
-## Safe removal
-
-Restore all assigned plugins before uninstalling:
+Restore every assigned plugin before uninstalling:
 
 ```bash
 ~/.config/omarchy/plugins/io.github.dlpwaters.plugin-folders/folderctl restore-all
 omarchy plugin remove io.github.dlpwaters.plugin-folders --yes
+omarchy restart shell
 ```
 
-`restore-all` removes the folder widgets and returns every member to the bar.
+`restore-all` removes the folder widgets and returns every member to its saved bar location.
 
-## Diagnostics and testing
+## Privacy and safety
+
+Plugin Folders is local-first. It has no account, telemetry, analytics, network service, or cloud storage.
+
+- State is stored at `${XDG_STATE_HOME:-~/.local/state}/omarchy-plugin-folders/state.json`.
+- Shell changes happen only after an explicit create, apply, restore, or delete action.
+- A last-operation safety copy is kept beside `shell.json` as `shell.json.plugin-folders.bak`.
+- First-party `omarchy.*` and structural bar widgets cannot be placed in folders.
+- The helper uses an exclusive lock and atomic file replacement for concurrent changes.
+
+As with every Omarchy shell plugin, review the source before installing: third-party plugins execute inside the unsandboxed `omarchy-shell` process.
+
+## Requirements
+
+- Omarchy Quattro with third-party shell plugin support; tested on `4.0.0-1`.
+- Python 3 standard library for the local `folderctl` state helper.
+- No additional packages, privileged access, or network connection after installation.
+
+## Diagnostics and development
 
 ```bash
+# Check saved state against the active bar configuration
 ~/.config/omarchy/plugins/io.github.dlpwaters.plugin-folders/folderctl doctor
+
+# Validate the manifest and entry points
 omarchy plugin validate ~/.config/omarchy/plugins/io.github.dlpwaters.plugin-folders
+
+# Run the regression suite
+python -m unittest discover \
+  ~/.config/omarchy/plugins/io.github.dlpwaters.plugin-folders/tests -v
+
+# Lint QML
 qmllint -I /usr/share/omarchy/shell \
   ~/.config/omarchy/plugins/io.github.dlpwaters.plugin-folders/BarWidget.qml \
   ~/.config/omarchy/plugins/io.github.dlpwaters.plugin-folders/Panel.qml \
   ~/.config/omarchy/plugins/io.github.dlpwaters.plugin-folders/Service.qml
-python -m unittest discover \
-  ~/.config/omarchy/plugins/io.github.dlpwaters.plugin-folders/tests -v
 ```
-
-## Compatibility
-
-Built and tested on Omarchy `4.0.0-1`. Plugin Folders intentionally protects
-first-party `omarchy.*` and structural bar widgets. Third-party widgets with a
-standard Omarchy `bar-widget` entry point are eligible.
 
 ## License
 
-[MIT](LICENSE)
+MIT © 2026 David Waters. See [LICENSE](LICENSE).

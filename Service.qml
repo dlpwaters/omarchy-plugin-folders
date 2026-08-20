@@ -51,6 +51,12 @@ Item {
       return "ok"
     }
 
+    function launch(folderId: string, pluginId: string): string {
+      var item = root.folderWidget(folderId)
+      if (!item) return "unknown folder"
+      return item.launchMember(pluginId) ? "ok" : "plugin unavailable"
+    }
+
     function status(folderId: string): string {
       var item = root.folderWidget(folderId)
       if (!item) return "{}"

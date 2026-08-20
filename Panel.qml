@@ -15,8 +15,9 @@ Panel {
   property string folderId: ""
   property var folderData: ({ id: "", name: "Plugins", icon: "󰉋", color: "#7aa2f7", members: [] })
   property string helperPath: ""
-  property var barWidgetRegistry: null
   property var catalog: ({ folders: [], plugins: [] })
+  property var pendingSelection: ({})
+  property bool selectionDirty: false
 
   readonly property var barIdentity: hostWidget || root
   readonly property color foreground: bar ? bar.foreground : Color.foreground
@@ -34,6 +35,7 @@ Panel {
 
   property bool manageMode: false
   property bool busy: false
+  property bool membershipAction: false
   property bool confirmDelete: false
   property string statusText: ""
   property bool statusError: false
@@ -47,17 +49,6 @@ Panel {
     return Array.isArray(folderData.members) ? folderData.members : []
   }
 
-  function memberEntrySettings(member) {
-    return member && member.entry && typeof member.entry === "object" ? member.entry : ({})
-  }
-
-  function memberComponent(pluginId) {
-    if (!barWidgetRegistry) return null
-    var widgets = barWidgetRegistry.widgets
-    var record = widgets ? widgets[String(pluginId)] : null
-    return record ? record.component : null
-  }
-
   function refreshCatalog() {
     if (helperPath === "" || catalogProc.running) return
     catalogOutput = ""
@@ -68,7 +59,10 @@ Panel {
   function parseCatalog() {
     try {
       var payload = JSON.parse(catalogOutput)
-      if (payload && payload.ok && payload.result) catalog = payload.result
+      if (payload && payload.ok && payload.result) {
+        catalog = payload.result
+        if (manageMode && !selectionDirty) resetPendingSelection()
+      }
       else if (payload && payload.error) showStatus(payload.error, true)
     } catch (error) {
       showStatus("Could not read the plugin catalog.", true)
@@ -101,6 +95,70 @@ Panel {
     statusTimer.restart()
   }
 
+  function resetPendingSelection() {
+    var next = ({})
+    var current = members()
+    for (var i = 0; i < current.length; i++) next[String(current[i].id)] = true
+    pendingSelection = next
+    selectionDirty = false
+  }
+
+  function isPendingSelected(pluginId) {
+    return pendingSelection[String(pluginId)] === true
+  }
+
+  function togglePending(pluginId) {
+    var id = String(pluginId)
+    var next = ({})
+    for (var key in pendingSelection) next[key] = pendingSelection[key]
+    next[id] = next[id] !== true
+    pendingSelection = next
+    selectionDirty = membershipChangeCount() > 0
+  }
+
+  function setVisibleSelection(selected) {
+    var next = ({})
+    for (var key in pendingSelection) next[key] = pendingSelection[key]
+    var visible = visiblePlugins()
+    for (var i = 0; i < visible.length; i++) next[String(visible[i].id)] = selected === true
+    pendingSelection = next
+    selectionDirty = membershipChangeCount() > 0
+  }
+
+  function selectedPluginIds() {
+    var source = catalog && Array.isArray(catalog.plugins) ? catalog.plugins : []
+    var result = []
+    for (var i = 0; i < source.length; i++) {
+      if (isPendingSelected(source[i].id)) result.push(String(source[i].id))
+    }
+    return result
+  }
+
+  function membershipChangeCount() {
+    var source = catalog && Array.isArray(catalog.plugins) ? catalog.plugins : []
+    var changes = 0
+    for (var i = 0; i < source.length; i++) {
+      var currentlySelected = source[i].assignedFolderId === folderId
+      if (isPendingSelected(source[i].id) !== currentlySelected) changes++
+    }
+    return changes
+  }
+
+  function applyMembership() {
+    var changes = membershipChangeCount()
+    if (changes === 0) return
+    membershipAction = true
+    runAction(["set-members", folderId].concat(selectedPluginIds()),
+      changes + " plugin change" + (changes === 1 ? "" : "s") + " applied")
+  }
+
+  function launchMember(plugin) {
+    if (!hostWidget || typeof hostWidget.launchMember !== "function"
+        || !hostWidget.launchMember(String(plugin.id))) {
+      showStatus(String(plugin.name || plugin.id) + " could not be loaded.", true)
+    }
+  }
+
   function runAction(argumentsList, label) {
     if (busy || helperPath === "") return
     busy = true
@@ -115,9 +173,12 @@ Panel {
     var payload = null
     try { payload = JSON.parse(actionOutput) } catch (error) {}
     if (exitCode !== 0 || !payload || !payload.ok) {
+      membershipAction = false
       showStatus(payload && payload.error ? payload.error : actionLabel + " failed.", true)
       return
     }
+    if (membershipAction) selectionDirty = false
+    membershipAction = false
     confirmDelete = false
     showStatus(actionLabel, false)
     if (hostWidget && typeof hostWidget.refresh === "function") hostWidget.refresh()
@@ -134,18 +195,12 @@ Panel {
       "--color", selectedColor], "Folder updated")
   }
 
-  function togglePlugin(plugin) {
-    if (plugin.assignedFolderId === folderId)
-      runAction(["unassign", folderId, plugin.id], plugin.name + " restored to the bar")
-    else
-      runAction(["assign", folderId, plugin.id], plugin.name + " moved into this folder")
-  }
-
   function open() {
     manageMode = false
     confirmDelete = false
     selectedIcon = String(folderData.icon || "󰉋")
     selectedColor = String(folderData.color || "#7aa2f7")
+    resetPendingSelection()
     root.controller.show()
     refreshCatalog()
   }
@@ -157,6 +212,7 @@ Panel {
       folderName.text = String(folderData.name || "Plugins")
       selectedIcon = String(folderData.icon || "󰉋")
       selectedColor = String(folderData.color || "#7aa2f7")
+      resetPendingSelection()
       refreshCatalog()
       Qt.callLater(function() { pluginSearch.forceActiveFocus() })
     }
@@ -329,25 +385,11 @@ Panel {
                       width: parent.width
                       height: Style.space(52)
 
-                      Loader {
-                        id: memberLoader
-                        anchors.centerIn: parent
-                        width: Math.min(parent.width, item ? Math.max(Style.space(36), item.implicitWidth) : Style.space(36))
-                        height: Math.min(parent.height, item ? Math.max(Style.space(36), item.implicitHeight) : Style.space(36))
-                        sourceComponent: root.memberComponent(memberTile.modelData.id)
-                        onLoaded: {
-                          if (!item) return
-                          if ("bar" in item) item.bar = root.bar
-                          if ("moduleName" in item) item.moduleName = String(memberTile.modelData.id)
-                          if ("settings" in item) item.settings = root.memberEntrySettings(memberTile.modelData)
-                        }
-                      }
-
                       Text {
-                        visible: memberLoader.status !== Loader.Ready
                         anchors.centerIn: parent
-                        text: memberLoader.status === Loader.Error ? "󰅚" : "󰇚"
-                        color: memberLoader.status === Loader.Error ? Color.urgent : root.muted
+                        text: root.hostWidget && typeof root.hostWidget.memberIcon === "function"
+                          ? root.hostWidget.memberIcon(memberTile.modelData.id) : "󰐱"
+                        color: root.folderColor
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.iconLarge
                       }
@@ -366,6 +408,11 @@ Panel {
                   }
 
                   HoverHandler { id: tileHover }
+                  MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.launchMember(memberTile.modelData)
+                  }
                 }
               }
             }
@@ -548,23 +595,23 @@ Panel {
                       height: Style.space(46)
                       leftAlign: true
                       text: String(modelData.name)
-                      iconText: modelData.assignedFolderId === root.folderId ? "󰄬" : "󰐕"
+                      iconText: root.isPendingSelected(modelData.id) ? "󰄬" : "󰐕"
                       tooltipText: String(modelData.id)
                       foreground: root.foreground
                       accent: root.folderColor
-                      selected: modelData.assignedFolderId === root.folderId
+                      selected: root.isPendingSelected(modelData.id)
                       bordered: false
                       focusable: true
                       enabled: !root.busy
-                      onClicked: root.togglePlugin(modelData)
+                      onClicked: root.togglePending(modelData.id)
 
                       Text {
                         anchors.right: parent.right
                         anchors.rightMargin: Style.space(10)
                         anchors.verticalCenter: parent.verticalCenter
-                        text: pluginRow.modelData.assignedFolderId === root.folderId
-                          ? "IN FOLDER" : String(pluginRow.modelData.category || "PLUGIN").toUpperCase()
-                        color: pluginRow.modelData.assignedFolderId === root.folderId ? root.folderColor : root.muted
+                        text: root.isPendingSelected(pluginRow.modelData.id)
+                          ? "SELECTED" : String(pluginRow.modelData.category || "PLUGIN").toUpperCase()
+                        color: root.isPendingSelected(pluginRow.modelData.id) ? root.folderColor : root.muted
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.caption
                         font.bold: true
@@ -588,6 +635,54 @@ Panel {
                 }
 
                 QQC.ScrollBar.vertical: QQC.ScrollBar { policy: QQC.ScrollBar.AsNeeded }
+              }
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+
+              Button {
+                id: selectShownButton
+                text: "Select shown"
+                iconText: "󰄬"
+                foreground: root.foreground
+                accent: root.folderColor
+                bordered: true
+                focusable: true
+                enabled: !root.busy && root.visiblePlugins().length > 0
+                onClicked: root.setVisibleSelection(true)
+              }
+
+              Button {
+                id: clearShownButton
+                text: "Clear shown"
+                iconText: "󰅖"
+                foreground: root.foreground
+                accent: root.folderColor
+                bordered: true
+                focusable: true
+                enabled: !root.busy && root.visiblePlugins().length > 0
+                onClicked: root.setVisibleSelection(false)
+              }
+
+              Item {
+                width: Math.max(0, parent.width - selectShownButton.width
+                  - clearShownButton.width - applyButton.width - parent.spacing * 3)
+                height: 1
+              }
+
+              Button {
+                id: applyButton
+                text: root.membershipChangeCount() === 0
+                  ? "Up to date" : "Apply " + root.membershipChangeCount()
+                iconText: root.membershipChangeCount() === 0 ? "󰄬" : "󰆓"
+                foreground: root.foreground
+                accent: root.folderColor
+                bordered: true
+                focusable: true
+                enabled: !root.busy && root.membershipChangeCount() > 0
+                onClicked: root.applyMembership()
               }
             }
 
