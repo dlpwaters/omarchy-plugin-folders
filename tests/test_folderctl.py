@@ -155,6 +155,49 @@ class FolderCtlTests(unittest.TestCase):
         self.assertFalse(failure["ok"])
         self.assertIn("already assigned", failure["error"])
 
+    def test_set_members_adds_and_removes_multiple_plugins_atomically(self) -> None:
+        folder_id = self.bootstrap()
+        result = self.run_ctl(
+            "set-members", folder_id, "test.alpha", "test.beta", "test.gamma"
+        )["result"]
+        self.assertEqual(set(result["added"]), {"test.alpha", "test.beta", "test.gamma"})
+        self.assertEqual(result["removed"], [])
+
+        result = self.run_ctl("set-members", folder_id, "test.alpha", "test.gamma")["result"]
+        self.assertEqual(result["added"], [])
+        self.assertEqual(result["removed"], ["test.beta"])
+        shell = self.read_shell()
+        self.assertIn("test.beta", [entry.get("id") for entry in shell["bar"]["layout"]["left"]])
+        self.assertTrue(self.run_ctl("doctor")["result"]["ok"])
+
+    def test_set_members_can_clear_folder_and_restores_original_order(self) -> None:
+        folder_id = self.bootstrap()
+        self.run_ctl("set-members", folder_id, "test.alpha", "test.beta")
+        self.run_ctl("set-members", folder_id)
+        left_ids = [entry.get("id") for entry in self.read_shell()["bar"]["layout"]["left"]]
+        self.assertLess(left_ids.index("test.alpha"), left_ids.index("test.beta"))
+        self.assertEqual(self.run_ctl("get-folder", folder_id)["result"]["members"], [])
+
+    def test_set_members_rejects_invalid_batch_without_partial_changes(self) -> None:
+        folder_id = self.bootstrap()
+        shell_before = self.shell.read_text(encoding="utf-8")
+        state_before = self.state.read_text(encoding="utf-8")
+        failure = self.run_ctl(
+            "set-members", folder_id, "test.alpha", "missing.plugin", expect=2
+        )
+        self.assertIn("not currently on the bar", failure["error"])
+        self.assertEqual(self.shell.read_text(encoding="utf-8"), shell_before)
+        self.assertEqual(self.state.read_text(encoding="utf-8"), state_before)
+
+    def test_set_members_preserves_preexisting_keepalive_on_restore(self) -> None:
+        shell = self.read_shell()
+        shell["plugins"].append({"id": "test.beta", "keepLoaded": True})
+        self.write_shell(shell)
+        folder_id = self.bootstrap()
+        self.run_ctl("set-members", folder_id, "test.alpha", "test.beta")
+        self.run_ctl("set-members", folder_id, "test.alpha")
+        self.assertIn({"id": "test.beta", "keepLoaded": True}, self.read_shell()["plugins"])
+
     def test_delete_restores_all_members_and_removes_only_that_folder(self) -> None:
         first = self.bootstrap()
         second = self.run_ctl("create", "Media", "󰝚", "#bb9af7", "--after", first)["result"]["id"]
