@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.dlpwaters.plugin-folders",
+  "name": "Plugin Folders",
+  "version": "1.0.0",
+  "author": "David Waters",
+  "license": "MIT",
+  "description": "Create colorful top-bar folders that hold other Omarchy plugin widgets without disabling their native behavior.",
+  "kinds": ["bar-widget", "service"],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml",
+    "service": "Service.qml"
+  },
+  "barWidget": {
+    "displayName": "Plugin Folders",
+    "description": "Repeatable folders for decluttering the Omarchy bar",
+    "category": "Productivity",
+    "defaultSection": "left",
+    "allowMultiple": true,
+    "defaults": {
+      "folderId": ""
+    },
+    "schema": []
+  }
+}

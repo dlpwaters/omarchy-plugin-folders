@@ -1,0 +1,655 @@
+#!/usr/bin/env python3
+"""State and shell-layout manager for the Omarchy Plugin Folders widget."""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import fcntl
+import json
+import os
+import re
+import shutil
+import sys
+import tempfile
+import uuid
+from pathlib import Path
+from typing import Any, Callable
+
+
+SELF_ID = "io.github.dlpwaters.plugin-folders"
+STATE_VERSION = 1
+DEFAULT_ICON = "󰉋"
+DEFAULT_COLOR = "#7aa2f7"
+SECTIONS = ("left", "center", "right")
+PROTECTED_IDS = {
+    SELF_ID,
+    "omarchy.menu",
+    "omarchy.workspaces",
+    "omarchy.clock",
+    "omarchy.tray",
+    "omarchy.spacer",
+    "omarchy.indicators",
+}
+
+
+class FolderError(RuntimeError):
+    pass
+
+
+def home_path() -> Path:
+    return Path(os.environ.get("HOME", str(Path.home()))).expanduser()
+
+
+def shell_path() -> Path:
+    override = os.environ.get("OMARCHY_PLUGIN_FOLDERS_SHELL_CONFIG")
+    return Path(override).expanduser() if override else home_path() / ".config/omarchy/shell.json"
+
+
+def state_path() -> Path:
+    override = os.environ.get("OMARCHY_PLUGIN_FOLDERS_STATE")
+    if override:
+        return Path(override).expanduser()
+    base = Path(os.environ.get("XDG_STATE_HOME", home_path() / ".local/state"))
+    return base / "omarchy-plugin-folders/state.json"
+
+
+def manifest_roots() -> list[Path]:
+    override = os.environ.get("OMARCHY_PLUGIN_FOLDERS_MANIFEST_DIRS")
+    if override is not None:
+        return [Path(item).expanduser() for item in override.split(os.pathsep) if item]
+    return [
+        Path("/usr/share/omarchy/shell/plugins"),
+        home_path() / ".config/omarchy/plugins",
+    ]
+
+
+def read_json(path: Path, default: Any = None) -> Any:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except FileNotFoundError:
+        if default is not None:
+            return copy.deepcopy(default)
+        raise FolderError(f"missing file: {path}")
+    except json.JSONDecodeError as error:
+        raise FolderError(f"invalid JSON in {path}: {error}") from error
+
+
+def atomic_json(path: Path, value: Any, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def default_state() -> dict[str, Any]:
+    return {"version": STATE_VERSION, "folders": []}
+
+
+def normalize_state(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise FolderError("state root must be an object")
+    if value.get("version") != STATE_VERSION:
+        raise FolderError(f"unsupported state version: {value.get('version')}")
+    if not isinstance(value.get("folders"), list):
+        raise FolderError("state folders must be an array")
+    return value
+
+
+def normalize_config(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise FolderError("shell config root must be an object")
+    bar = value.setdefault("bar", {})
+    if not isinstance(bar, dict):
+        raise FolderError("shell config bar must be an object")
+    layout = bar.setdefault("layout", {})
+    if not isinstance(layout, dict):
+        raise FolderError("shell config bar.layout must be an object")
+    for section in SECTIONS:
+        entries = layout.setdefault(section, [])
+        if not isinstance(entries, list):
+            raise FolderError(f"shell config bar.layout.{section} must be an array")
+    plugins = value.setdefault("plugins", [])
+    if not isinstance(plugins, list):
+        raise FolderError("shell config plugins must be an array")
+    return value
+
+
+def entry_id(entry: Any) -> str:
+    if isinstance(entry, str):
+        return entry
+    return str(entry.get("id", "")) if isinstance(entry, dict) else ""
+
+
+def plugin_entry_index(config: dict[str, Any], plugin_id: str) -> int:
+    for index, entry in enumerate(config["plugins"]):
+        if entry_id(entry) == plugin_id:
+            return index
+    return -1
+
+
+def find_bar_entry(config: dict[str, Any], plugin_id: str) -> dict[str, Any] | None:
+    for section in SECTIONS:
+        entries = config["bar"]["layout"][section]
+        for index, entry in enumerate(entries):
+            if entry_id(entry) == plugin_id:
+                return {"section": section, "index": index, "entry": entry}
+    return None
+
+
+def find_folder_entry(config: dict[str, Any], folder_id: str) -> dict[str, Any] | None:
+    for section in SECTIONS:
+        entries = config["bar"]["layout"][section]
+        for index, entry in enumerate(entries):
+            if entry_id(entry) != SELF_ID or not isinstance(entry, dict):
+                continue
+            if str(entry.get("folderId", "")) == folder_id:
+                return {"section": section, "index": index, "entry": entry}
+    return None
+
+
+def find_folder(state: dict[str, Any], folder_id: str) -> dict[str, Any]:
+    for folder in state["folders"]:
+        if str(folder.get("id", "")) == folder_id:
+            return folder
+    raise FolderError(f"unknown folder: {folder_id}")
+
+
+def safe_folder_name(value: str) -> str:
+    name = re.sub(r"\s+", " ", value.strip())
+    if not name:
+        raise FolderError("folder name cannot be empty")
+    if len(name) > 32:
+        raise FolderError("folder name cannot exceed 32 characters")
+    return name
+
+
+def safe_icon(value: str) -> str:
+    icon = value.strip()
+    if not icon or len(icon) > 4:
+        raise FolderError("choose a valid folder icon")
+    return icon
+
+
+def safe_color(value: str) -> str:
+    color = value.strip().lower()
+    if not re.fullmatch(r"#[0-9a-f]{6}", color):
+        raise FolderError("color must be a six-digit hex value")
+    return color
+
+
+def new_folder(name: str, icon: str, color: str) -> dict[str, Any]:
+    return {
+        "id": f"folder-{uuid.uuid4().hex[:10]}",
+        "name": safe_folder_name(name),
+        "icon": safe_icon(icon),
+        "color": safe_color(color),
+        "members": [],
+    }
+
+
+def display_name(manifests: dict[str, dict[str, Any]], plugin_id: str) -> str:
+    manifest = manifests.get(plugin_id, {})
+    bar_meta = manifest.get("barWidget") if isinstance(manifest.get("barWidget"), dict) else {}
+    return str(bar_meta.get("displayName") or manifest.get("name") or plugin_id)
+
+
+def scan_manifests() -> dict[str, dict[str, Any]]:
+    manifests: dict[str, dict[str, Any]] = {}
+    for root in manifest_roots():
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("manifest.json")):
+            try:
+                manifest = read_json(path)
+            except FolderError:
+                continue
+            if not isinstance(manifest, dict):
+                continue
+            plugin_id = str(manifest.get("id", ""))
+            if not plugin_id:
+                continue
+            manifest = copy.deepcopy(manifest)
+            manifest["__manifestPath"] = str(path)
+            manifests[plugin_id] = manifest
+    return manifests
+
+
+def is_protected(plugin_id: str) -> bool:
+    return plugin_id in PROTECTED_IDS or plugin_id.startswith("omarchy.")
+
+
+def all_members(state: dict[str, Any]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for folder in state["folders"]:
+        folder_id = str(folder.get("id", ""))
+        for member in folder.get("members", []):
+            result[str(member.get("id", ""))] = folder_id
+    return result
+
+
+def choose_folder_insert(config: dict[str, Any], after_folder_id: str = "") -> tuple[str, int]:
+    if after_folder_id:
+        existing = find_folder_entry(config, after_folder_id)
+        if existing:
+            return existing["section"], existing["index"] + 1
+    left = config["bar"]["layout"]["left"]
+    last_folder = -1
+    workspaces = -1
+    for index, entry in enumerate(left):
+        if entry_id(entry) == SELF_ID:
+            last_folder = index
+        if entry_id(entry) == "omarchy.workspaces":
+            workspaces = index
+    if last_folder >= 0:
+        return "left", last_folder + 1
+    return "left", workspaces + 1 if workspaces >= 0 else len(left)
+
+
+def insert_folder_entry(
+    config: dict[str, Any], folder_id: str, after_folder_id: str = ""
+) -> None:
+    section, index = choose_folder_insert(config, after_folder_id)
+    config["bar"]["layout"][section].insert(index, {"id": SELF_ID, "folderId": folder_id})
+
+
+def remove_folder_entry(config: dict[str, Any], folder_id: str) -> None:
+    for section in SECTIONS:
+        entries = config["bar"]["layout"][section]
+        config["bar"]["layout"][section] = [
+            entry
+            for entry in entries
+            if not (
+                entry_id(entry) == SELF_ID
+                and isinstance(entry, dict)
+                and str(entry.get("folderId", "")) == folder_id
+            )
+        ]
+
+
+def restore_member(config: dict[str, Any], member: dict[str, Any]) -> None:
+    plugin_id = str(member["id"])
+    if find_bar_entry(config, plugin_id):
+        raise FolderError(f"cannot restore {plugin_id}: it is already on the bar")
+
+    if bool(member.get("keepAliveAdded")):
+        index = plugin_entry_index(config, plugin_id)
+        if index >= 0:
+            config["plugins"].pop(index)
+
+    section = str(member.get("section", "left"))
+    if section not in SECTIONS:
+        section = "left"
+    entries = config["bar"]["layout"][section]
+    before_id = str(member.get("beforeId", ""))
+    after_id = str(member.get("afterId", ""))
+
+    target = None
+    if before_id:
+        for index, entry in enumerate(entries):
+            if entry_id(entry) == before_id:
+                target = index + 1
+                break
+    if target is None and after_id:
+        for index, entry in enumerate(entries):
+            if entry_id(entry) == after_id:
+                target = index
+                break
+    if target is None:
+        target = max(0, min(int(member.get("index", len(entries))), len(entries)))
+    entries.insert(target, copy.deepcopy(member["entry"]))
+
+
+def assign_member(
+    config: dict[str, Any], state: dict[str, Any], folder_id: str, plugin_id: str
+) -> dict[str, Any]:
+    folder = find_folder(state, folder_id)
+    if is_protected(plugin_id):
+        raise FolderError(f"{plugin_id} is a protected structural widget")
+    existing = all_members(state).get(plugin_id)
+    if existing:
+        raise FolderError(f"{plugin_id} is already assigned to {existing}")
+    location = find_bar_entry(config, plugin_id)
+    if not location:
+        raise FolderError(f"{plugin_id} is not currently on the bar")
+
+    manifests = scan_manifests()
+    manifest = manifests.get(plugin_id)
+    kinds = manifest.get("kinds", []) if isinstance(manifest, dict) else []
+    if "bar-widget" not in kinds:
+        raise FolderError(f"{plugin_id} does not provide a bar widget")
+
+    entries = config["bar"]["layout"][location["section"]]
+    index = int(location["index"])
+    before_id = entry_id(entries[index - 1]) if index > 0 else ""
+    after_id = entry_id(entries[index + 1]) if index + 1 < len(entries) else ""
+    keep_alive_added = plugin_entry_index(config, plugin_id) < 0
+    if keep_alive_added:
+        config["plugins"].append({"id": plugin_id})
+    entries.pop(index)
+
+    member = {
+        "id": plugin_id,
+        "name": display_name(manifests, plugin_id),
+        "entry": copy.deepcopy(location["entry"]),
+        "section": location["section"],
+        "index": index,
+        "beforeId": before_id,
+        "afterId": after_id,
+        "keepAliveAdded": keep_alive_added,
+    }
+    folder["members"].append(member)
+    return member
+
+
+def write_pair(config: dict[str, Any], state: dict[str, Any]) -> None:
+    config_path = shell_path()
+    state_file = state_path()
+    backup_path = config_path.with_name(f"{config_path.name}.plugin-folders.bak")
+    config_mode = config_path.stat().st_mode & 0o777 if config_path.exists() else 0o600
+    if config_path.exists():
+        shutil.copy2(config_path, backup_path)
+    atomic_json(state_file, state, 0o600)
+    atomic_json(config_path, config, config_mode)
+
+
+def mutate(callback: Callable[[dict[str, Any], dict[str, Any]], Any]) -> Any:
+    state_file = state_path()
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = state_file.with_suffix(".lock")
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        config = normalize_config(read_json(shell_path()))
+        state = normalize_state(read_json(state_file, default_state()))
+        result = callback(config, state)
+        write_pair(config, state)
+        return result
+
+
+def snapshot() -> tuple[dict[str, Any], dict[str, Any]]:
+    config = normalize_config(read_json(shell_path()))
+    state = normalize_state(read_json(state_path(), default_state()))
+    return config, state
+
+
+def operation_bootstrap(args: argparse.Namespace) -> dict[str, Any]:
+    def apply(config: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        if state["folders"]:
+            folder = state["folders"][0]
+            if not find_folder_entry(config, folder["id"]):
+                insert_folder_entry(config, folder["id"])
+            return folder
+        folder = new_folder(args.name, args.icon, args.color)
+        state["folders"].append(folder)
+        generic = find_bar_entry(config, SELF_ID)
+        if generic and not (
+            isinstance(generic["entry"], dict) and generic["entry"].get("folderId")
+        ):
+            config["bar"]["layout"][generic["section"]][generic["index"]] = {
+                "id": SELF_ID,
+                "folderId": folder["id"],
+            }
+        else:
+            insert_folder_entry(config, folder["id"])
+        return folder
+
+    return mutate(apply)
+
+
+def operation_create(args: argparse.Namespace) -> dict[str, Any]:
+    def apply(config: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        folder = new_folder(args.name, args.icon, args.color)
+        state["folders"].append(folder)
+        insert_folder_entry(config, folder["id"], args.after)
+        return folder
+
+    return mutate(apply)
+
+
+def operation_update(args: argparse.Namespace) -> dict[str, Any]:
+    def apply(config: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        del config
+        folder = find_folder(state, args.folder_id)
+        if args.name is not None:
+            folder["name"] = safe_folder_name(args.name)
+        if args.icon is not None:
+            folder["icon"] = safe_icon(args.icon)
+        if args.color is not None:
+            folder["color"] = safe_color(args.color)
+        return folder
+
+    return mutate(apply)
+
+
+def operation_assign(args: argparse.Namespace) -> dict[str, Any]:
+    return mutate(lambda config, state: assign_member(config, state, args.folder_id, args.plugin_id))
+
+
+def operation_unassign(args: argparse.Namespace) -> dict[str, Any]:
+    def apply(config: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        folder = find_folder(state, args.folder_id)
+        for index, member in enumerate(folder["members"]):
+            if str(member.get("id", "")) == args.plugin_id:
+                restore_member(config, member)
+                return folder["members"].pop(index)
+        raise FolderError(f"{args.plugin_id} is not in {args.folder_id}")
+
+    return mutate(apply)
+
+
+def operation_reorder(args: argparse.Namespace) -> dict[str, Any]:
+    def apply(config: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        del config
+        folder = find_folder(state, args.folder_id)
+        source = next(
+            (index for index, item in enumerate(folder["members"]) if item.get("id") == args.plugin_id),
+            -1,
+        )
+        if source < 0:
+            raise FolderError(f"{args.plugin_id} is not in {args.folder_id}")
+        member = folder["members"].pop(source)
+        target = max(0, min(args.index, len(folder["members"])))
+        folder["members"].insert(target, member)
+        return folder
+
+    return mutate(apply)
+
+
+def operation_delete(args: argparse.Namespace) -> dict[str, Any]:
+    def apply(config: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        folder = find_folder(state, args.folder_id)
+        members = sorted(
+            folder["members"],
+            key=lambda item: (SECTIONS.index(item.get("section", "left")), int(item.get("index", 0))),
+        )
+        for member in members:
+            restore_member(config, member)
+        remove_folder_entry(config, args.folder_id)
+        state["folders"] = [item for item in state["folders"] if item.get("id") != args.folder_id]
+        return folder
+
+    return mutate(apply)
+
+
+def operation_restore_all(_args: argparse.Namespace) -> dict[str, Any]:
+    def apply(config: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        restored = []
+        members = []
+        for folder in state["folders"]:
+            members.extend(folder.get("members", []))
+        members.sort(
+            key=lambda item: (SECTIONS.index(item.get("section", "left")), int(item.get("index", 0)))
+        )
+        for member in members:
+            restore_member(config, member)
+            restored.append(member["id"])
+        for section in SECTIONS:
+            config["bar"]["layout"][section] = [
+                entry for entry in config["bar"]["layout"][section] if entry_id(entry) != SELF_ID
+            ]
+        state["folders"] = []
+        return {"restored": restored}
+
+    return mutate(apply)
+
+
+def operation_state(_args: argparse.Namespace) -> dict[str, Any]:
+    _config, state = snapshot()
+    return state
+
+
+def operation_get_folder(args: argparse.Namespace) -> dict[str, Any]:
+    _config, state = snapshot()
+    return find_folder(state, args.folder_id)
+
+
+def operation_catalog(_args: argparse.Namespace) -> dict[str, Any]:
+    config, state = snapshot()
+    manifests = scan_manifests()
+    assigned = all_members(state)
+    bar_locations: dict[str, dict[str, Any]] = {}
+    for section in SECTIONS:
+        for index, entry in enumerate(config["bar"]["layout"][section]):
+            plugin_id = entry_id(entry)
+            if plugin_id and plugin_id not in bar_locations:
+                bar_locations[plugin_id] = {"section": section, "index": index}
+
+    rows = []
+    for plugin_id, manifest in manifests.items():
+        kinds = manifest.get("kinds", [])
+        if not isinstance(kinds, list) or "bar-widget" not in kinds or plugin_id == SELF_ID:
+            continue
+        location = bar_locations.get(plugin_id)
+        folder_id = assigned.get(plugin_id, "")
+        if not location and not folder_id:
+            continue
+        bar_meta = manifest.get("barWidget") if isinstance(manifest.get("barWidget"), dict) else {}
+        rows.append(
+            {
+                "id": plugin_id,
+                "name": str(bar_meta.get("displayName") or manifest.get("name") or plugin_id),
+                "description": str(bar_meta.get("description") or manifest.get("description") or ""),
+                "category": str(bar_meta.get("category") or "Plugin"),
+                "inBar": location is not None,
+                "section": location["section"] if location else "",
+                "index": location["index"] if location else -1,
+                "assignedFolderId": folder_id,
+                "protected": is_protected(plugin_id),
+            }
+        )
+    rows.sort(key=lambda row: (row["protected"], row["name"].casefold(), row["id"]))
+    return {"folders": state["folders"], "plugins": rows}
+
+
+def operation_doctor(_args: argparse.Namespace) -> dict[str, Any]:
+    config, state = snapshot()
+    errors = []
+    seen_members: set[str] = set()
+    for folder in state["folders"]:
+        folder_id = str(folder.get("id", ""))
+        if not find_folder_entry(config, folder_id):
+            errors.append(f"folder {folder_id} has no bar entry")
+        for member in folder.get("members", []):
+            plugin_id = str(member.get("id", ""))
+            if plugin_id in seen_members:
+                errors.append(f"plugin {plugin_id} is assigned more than once")
+            seen_members.add(plugin_id)
+            if find_bar_entry(config, plugin_id):
+                errors.append(f"assigned plugin {plugin_id} is still on the bar")
+            if plugin_entry_index(config, plugin_id) < 0:
+                errors.append(f"assigned plugin {plugin_id} is not kept enabled")
+    return {"ok": not errors, "errors": errors, "folders": len(state["folders"]), "members": len(seen_members)}
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    bootstrap = sub.add_parser("bootstrap")
+    bootstrap.add_argument("--name", default="Plugins")
+    bootstrap.add_argument("--icon", default=DEFAULT_ICON)
+    bootstrap.add_argument("--color", default=DEFAULT_COLOR)
+    bootstrap.set_defaults(handler=operation_bootstrap)
+
+    create = sub.add_parser("create")
+    create.add_argument("name")
+    create.add_argument("icon")
+    create.add_argument("color")
+    create.add_argument("--after", default="")
+    create.set_defaults(handler=operation_create)
+
+    update = sub.add_parser("update")
+    update.add_argument("folder_id")
+    update.add_argument("--name")
+    update.add_argument("--icon")
+    update.add_argument("--color")
+    update.set_defaults(handler=operation_update)
+
+    assign = sub.add_parser("assign")
+    assign.add_argument("folder_id")
+    assign.add_argument("plugin_id")
+    assign.set_defaults(handler=operation_assign)
+
+    unassign = sub.add_parser("unassign")
+    unassign.add_argument("folder_id")
+    unassign.add_argument("plugin_id")
+    unassign.set_defaults(handler=operation_unassign)
+
+    reorder = sub.add_parser("reorder")
+    reorder.add_argument("folder_id")
+    reorder.add_argument("plugin_id")
+    reorder.add_argument("index", type=int)
+    reorder.set_defaults(handler=operation_reorder)
+
+    delete = sub.add_parser("delete")
+    delete.add_argument("folder_id")
+    delete.set_defaults(handler=operation_delete)
+
+    restore = sub.add_parser("restore-all")
+    restore.set_defaults(handler=operation_restore_all)
+
+    state = sub.add_parser("state")
+    state.set_defaults(handler=operation_state)
+
+    get_folder = sub.add_parser("get-folder")
+    get_folder.add_argument("folder_id")
+    get_folder.set_defaults(handler=operation_get_folder)
+
+    catalog = sub.add_parser("catalog")
+    catalog.set_defaults(handler=operation_catalog)
+
+    doctor = sub.add_parser("doctor")
+    doctor.set_defaults(handler=operation_doctor)
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    try:
+        result = args.handler(args)
+        print(json.dumps({"ok": True, "result": result}, ensure_ascii=False, separators=(",", ":")))
+        return 0
+    except FolderError as error:
+        print(json.dumps({"ok": False, "error": str(error)}, ensure_ascii=False, separators=(",", ":")))
+        return 2
+    except Exception as error:  # pragma: no cover - defensive UI boundary
+        print(json.dumps({"ok": False, "error": f"unexpected error: {error}"}, separators=(",", ":")))
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
