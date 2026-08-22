@@ -44,6 +44,9 @@ Panel {
   property string actionLabel: ""
   property string selectedIcon: String(folderData.icon || "󰉋")
   property string selectedColor: String(folderData.color || "#7aa2f7")
+  property int launcherIndex: -1
+
+  readonly property int launcherColumns: 3
 
   function members() {
     return Array.isArray(folderData.members) ? folderData.members : []
@@ -159,6 +162,36 @@ Panel {
     }
   }
 
+  function resetLauncherCursor() {
+    launcherIndex = members().length > 0 ? 0 : -1
+  }
+
+  function moveLauncherCursor(dx, dy) {
+    var count = members().length
+    if (count === 0) {
+      launcherIndex = -1
+      return
+    }
+
+    var current = launcherIndex >= 0 && launcherIndex < count ? launcherIndex : 0
+    if (dx !== 0) {
+      launcherIndex = Math.max(0, Math.min(count - 1, current + dx))
+      return
+    }
+
+    var column = current % launcherColumns
+    var row = Math.floor(current / launcherColumns)
+    var lastRow = Math.floor((count - 1) / launcherColumns)
+    var nextRow = Math.max(0, Math.min(lastRow, row + dy))
+    launcherIndex = Math.min(count - 1, nextRow * launcherColumns + column)
+  }
+
+  function activateLauncherCursor() {
+    var items = members()
+    if (launcherIndex < 0 || launcherIndex >= items.length) return
+    launchMember(items[launcherIndex])
+  }
+
   function runAction(argumentsList, label) {
     if (busy || helperPath === "") return
     busy = true
@@ -198,6 +231,7 @@ Panel {
   function open() {
     manageMode = false
     confirmDelete = false
+    resetLauncherCursor()
     selectedIcon = String(folderData.icon || "󰉋")
     selectedColor = String(folderData.color || "#7aa2f7")
     resetPendingSelection()
@@ -208,6 +242,7 @@ Panel {
   function setManageMode(value) {
     manageMode = value
     confirmDelete = false
+    if (!value) resetLauncherCursor()
     if (value) {
       folderName.text = String(folderData.name || "Plugins")
       selectedIcon = String(folderData.icon || "󰉋")
@@ -222,6 +257,7 @@ Panel {
     selectedIcon = String(folderData.icon || "󰉋")
     selectedColor = String(folderData.color || "#7aa2f7")
     if (manageMode) folderName.text = String(folderData.name || "Plugins")
+    if (!manageMode) resetLauncherCursor()
   }
 
   Process {
@@ -258,6 +294,12 @@ Panel {
       anchors.fill: parent
       blocked: folderName.activeFocus || pluginSearch.activeFocus
       onCloseRequested: root.close()
+      onMoveRequested: function(dx, dy) {
+        if (!root.manageMode) root.moveLauncherCursor(dx, dy)
+      }
+      onActivateRequested: {
+        if (!root.manageMode) root.activateLauncherCursor()
+      }
 
       Column {
         id: contentColumn
@@ -306,6 +348,7 @@ Panel {
               width: parent.width
               text: root.manageMode ? "CUSTOMIZE & ORGANIZE" : String(root.members().length)
                 + " PLUGIN" + (root.members().length === 1 ? "" : "S")
+                + (root.members().length > 0 ? "  ·  ARROWS + ENTER" : "")
               color: root.muted
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -367,12 +410,17 @@ Panel {
                 BorderSurface {
                   id: memberTile
                   required property var modelData
+                  required property int index
+                  readonly property bool keyboardSelected: !root.manageMode
+                    && root.launcherIndex === index
                   width: Math.floor((launcherContent.width - Style.space(16)) / 3)
                   height: Style.space(94)
                   radius: Style.cornerRadius
-                  color: tileHover.hovered ? Style.hoverFillFor(root.foreground, root.folderColor) : root.subtle
-                  borderSpec: tileHover.hovered
-                    ? Border.controlSpec("hover-cursor", root.foreground, root.folderColor)
+                  color: tileHover.hovered || keyboardSelected
+                    ? Style.hoverFillFor(root.foreground, root.folderColor) : root.subtle
+                  borderSpec: tileHover.hovered || keyboardSelected
+                    ? Border.controlSpec(keyboardSelected ? "keyboard-cursor" : "hover-cursor",
+                        root.foreground, root.folderColor)
                     : Border.none()
                   clip: true
 
@@ -407,11 +455,17 @@ Panel {
                     }
                   }
 
-                  HoverHandler { id: tileHover }
+                  HoverHandler {
+                    id: tileHover
+                    onHoveredChanged: if (hovered) root.launcherIndex = memberTile.index
+                  }
                   MouseArea {
                     anchors.fill: parent
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: root.launchMember(memberTile.modelData)
+                    onClicked: {
+                      root.launcherIndex = memberTile.index
+                      root.launchMember(memberTile.modelData)
+                    }
                   }
                 }
               }

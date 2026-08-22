@@ -7,7 +7,7 @@
 Turn a crowded Omarchy top bar into a small set of colorful launcher folders—without sacrificing native plugin windows, settings, or behavior.
 
 [![Omarchy Quattro](https://img.shields.io/badge/Omarchy-Quattro-e0af68?style=for-the-badge)](https://omarchy.org/)
-[![Version 1.1.0](https://img.shields.io/badge/version-1.1.0-7aa2f7?style=for-the-badge)](https://github.com/dlpwaters/omarchy-plugin-folders)
+[![Version 1.2.0](https://img.shields.io/badge/version-1.2.0-7aa2f7?style=for-the-badge)](https://github.com/dlpwaters/omarchy-plugin-folders)
 [![Local First](https://img.shields.io/badge/local--first-no%20telemetry-9ece6a?style=for-the-badge)](#privacy-and-safety)
 [![MIT License](https://img.shields.io/badge/license-MIT-bb9af7?style=for-the-badge)](LICENSE)
 
@@ -21,6 +21,7 @@ Plugin Folders gives you repeatable, color-coded launchers for the plugins you a
 
 - Create as many independent folders as you need.
 - Choose from 12 expressive icons and 10 accent colors.
+- Navigate launcher tiles with the arrow keys, then press Enter or Space to open one.
 - Select several plugins and apply the whole change at once.
 - Search, select all visible results, or clear them in one click.
 - Preserve native popups, action widgets, services, timers, and inline settings.
