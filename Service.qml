@@ -65,7 +65,11 @@ Item {
         name: String(item.folderData && item.folderData.name || ""),
         members: item.folderData && Array.isArray(item.folderData.members)
           ? item.folderData.members.length : 0,
-        opened: item.opened === true
+        opened: item.opened === true,
+        query: String(item.launcherQuery || ""),
+        visibleMembers: Number(item.launcherVisibleCount || 0),
+        selectedPluginId: String(item.launcherSelectedPluginId || ""),
+        searchFocused: item.launcherSearchFocused === true
       })
     }
   }

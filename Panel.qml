@@ -47,9 +47,31 @@ Panel {
   property int launcherIndex: -1
 
   readonly property int launcherColumns: 3
+  readonly property string launcherQuery: launcherSearch.text
+  readonly property int launcherVisibleCount: launcherMembers().length
+  readonly property string launcherSelectedPluginId: {
+    var visible = launcherMembers()
+    return launcherIndex >= 0 && launcherIndex < visible.length
+      ? String(visible[launcherIndex].id || "") : ""
+  }
+  readonly property bool launcherSearchFocused: launcherSearch.activeFocus
 
   function members() {
     return Array.isArray(folderData.members) ? folderData.members : []
+  }
+
+  function launcherMembers() {
+    var source = members()
+    var query = launcherSearch.text.trim().toLowerCase()
+    if (query === "") return source
+
+    var result = []
+    for (var i = 0; i < source.length; i++) {
+      var plugin = source[i]
+      var haystack = (String(plugin.name || "") + " " + String(plugin.id || "")).toLowerCase()
+      if (haystack.indexOf(query) !== -1) result.push(plugin)
+    }
+    return result
   }
 
   function refreshCatalog() {
@@ -163,11 +185,11 @@ Panel {
   }
 
   function resetLauncherCursor() {
-    launcherIndex = members().length > 0 ? 0 : -1
+    launcherIndex = launcherMembers().length > 0 ? 0 : -1
   }
 
   function moveLauncherCursor(dx, dy) {
-    var count = members().length
+    var count = launcherMembers().length
     if (count === 0) {
       launcherIndex = -1
       return
@@ -187,7 +209,7 @@ Panel {
   }
 
   function activateLauncherCursor() {
-    var items = members()
+    var items = launcherMembers()
     if (launcherIndex < 0 || launcherIndex >= items.length) return
     launchMember(items[launcherIndex])
   }
@@ -231,18 +253,26 @@ Panel {
   function open() {
     manageMode = false
     confirmDelete = false
+    launcherSearch.clear()
     resetLauncherCursor()
     selectedIcon = String(folderData.icon || "󰉋")
     selectedColor = String(folderData.color || "#7aa2f7")
     resetPendingSelection()
     root.controller.show()
     refreshCatalog()
+    Qt.callLater(function() {
+      if (root.opened && !root.manageMode) launcherSearch.forceActiveFocus()
+    })
   }
 
   function setManageMode(value) {
     manageMode = value
     confirmDelete = false
-    if (!value) resetLauncherCursor()
+    if (!value) {
+      launcherSearch.clear()
+      resetLauncherCursor()
+      Qt.callLater(function() { launcherSearch.forceActiveFocus() })
+    }
     if (value) {
       folderName.text = String(folderData.name || "Plugins")
       selectedIcon = String(folderData.icon || "󰉋")
@@ -285,14 +315,14 @@ Panel {
     bar: root.bar
     open: root.opened
     centerOnBar: false
-    focusTarget: keyCatcher
+    focusTarget: root.manageMode ? keyCatcher : launcherSearch
     contentWidth: folderPanel.fittedContentWidth(root.desiredWidth)
     contentHeight: folderPanel.fittedContentHeight(contentColumn.implicitHeight, root.maximumHeight)
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      blocked: folderName.activeFocus || pluginSearch.activeFocus
+      blocked: folderName.activeFocus || pluginSearch.activeFocus || launcherSearch.activeFocus
       onCloseRequested: root.close()
       onMoveRequested: function(dx, dy) {
         if (!root.manageMode) root.moveLauncherCursor(dx, dy)
@@ -399,13 +429,55 @@ Panel {
               wrapMode: Text.WordWrap
             }
 
-            Flow {
+            TextField {
+              id: launcherSearch
               visible: root.members().length > 0
+              width: parent.width
+              placeholderText: "Type to search plugins…"
+              foreground: root.foreground
+              accent: root.folderColor
+              Keys.priority: Keys.BeforeItem
+              Keys.onPressed: function(event) {
+                if (event.key === Qt.Key_Escape) {
+                  root.close()
+                  event.accepted = true
+                  return
+                }
+                if (event.key === Qt.Key_Left) {
+                  root.moveLauncherCursor(-1, 0)
+                  event.accepted = true
+                  return
+                }
+                if (event.key === Qt.Key_Right) {
+                  root.moveLauncherCursor(1, 0)
+                  event.accepted = true
+                  return
+                }
+                if (event.key === Qt.Key_Up) {
+                  root.moveLauncherCursor(0, -1)
+                  event.accepted = true
+                  return
+                }
+                if (event.key === Qt.Key_Down) {
+                  root.moveLauncherCursor(0, 1)
+                  event.accepted = true
+                  return
+                }
+                if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                  root.activateLauncherCursor()
+                  event.accepted = true
+                }
+              }
+              onTextChanged: root.resetLauncherCursor()
+            }
+
+            Flow {
+              visible: root.launcherMembers().length > 0
               width: parent.width
               spacing: Style.space(8)
 
               Repeater {
-                model: root.members()
+                model: root.launcherMembers()
 
                 BorderSurface {
                   id: memberTile
@@ -469,6 +541,19 @@ Panel {
                   }
                 }
               }
+            }
+
+            Text {
+              visible: root.members().length > 0 && root.launcherMembers().length === 0
+              width: parent.width
+              topPadding: Style.space(20)
+              bottomPadding: Style.space(20)
+              text: "No plugins match this search."
+              color: root.muted
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              horizontalAlignment: Text.AlignHCenter
+              wrapMode: Text.WordWrap
             }
 
             Button {
