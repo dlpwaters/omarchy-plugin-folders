@@ -18,6 +18,14 @@ BarWidget {
   property string folderOutput: ""
   property int memberRevision: 0
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened : false
+  readonly property string launcherQuery: panelLoader.item
+    ? String(panelLoader.item.launcherQuery || "") : ""
+  readonly property int launcherVisibleCount: panelLoader.item
+    ? Number(panelLoader.item.launcherVisibleCount || 0) : 0
+  readonly property string launcherSelectedPluginId: panelLoader.item
+    ? String(panelLoader.item.launcherSelectedPluginId || "") : ""
+  readonly property bool launcherSearchFocused: panelLoader.item
+    ? panelLoader.item.launcherSearchFocused === true : false
 
   function memberComponent(pluginId) {
     var registry = root.bar ? root.bar.barWidgetRegistry : null
