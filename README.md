@@ -91,6 +91,11 @@ As with every Omarchy shell plugin, review the source before installing: third-p
 
 ## Diagnostics and development
 
+The service receives the shell's widget catalogue and tracks live folder widgets
+for IPC. Hosted members receive their own scoped bar interface from the native
+bar host, preserving their service access. `plugin-folders status <folder-id>`
+reports `unavailableMembers`; an empty list means every native widget loaded.
+
 ```bash
 # Check saved state against the active bar configuration
 ~/.config/omarchy/plugins/io.github.dlpwaters.plugin-folders/folderctl doctor
@@ -101,6 +106,9 @@ omarchy plugin validate ~/.config/omarchy/plugins/io.github.dlpwaters.plugin-fol
 # Run the regression suite
 python -m unittest discover \
   ~/.config/omarchy/plugins/io.github.dlpwaters.plugin-folders/tests -v
+
+# Check scoped widget hosting and folder IPC (requires Node.js for development)
+node ~/.config/omarchy/plugins/io.github.dlpwaters.plugin-folders/tests/test_widget_host.mjs
 
 # Lint QML
 qmllint -I /usr/share/omarchy/shell \

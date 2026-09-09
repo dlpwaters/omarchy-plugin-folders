@@ -8,6 +8,9 @@ BarWidget {
   id: root
 
   readonly property string folderId: String(setting("folderId", ""))
+  readonly property var folderService: bar && bar.shell
+    ? bar.shell.serviceFor("io.github.dlpwaters.plugin-folders") : null
+  readonly property var nativeBar: findNativeBar()
   readonly property string helperPath: String(Qt.resolvedUrl("folderctl")).replace(/^file:\/\//, "")
   readonly property string stateHome: {
     var configured = Quickshell.env("XDG_STATE_HOME")
@@ -28,10 +31,32 @@ BarWidget {
     ? panelLoader.item.launcherSearchFocused === true : false
 
   function memberComponent(pluginId) {
-    var registry = root.bar ? root.bar.barWidgetRegistry : null
+    var registry = folderService ? folderService.barWidgetRegistry : null
     var widgets = registry ? registry.widgets : null
     var record = widgets ? widgets[String(pluginId)] : null
     return record ? record.component : null
+  }
+
+  function findNativeBar() {
+    // Hosted widgets still belong to the real bar scene. Use its normal
+    // per-widget facade factory so each member keeps its own service scope.
+    var candidate = root.parent
+    while (candidate) {
+      if (typeof candidate.pluginBarApiFor === "function") return candidate
+      candidate = candidate.parent
+    }
+    return null
+  }
+
+  function memberBar(pluginId) {
+    return nativeBar ? nativeBar.pluginBarApiFor(pluginId, pluginId, true) : root.bar
+  }
+
+  onFolderServiceChanged: {
+    if (folderService) folderService.registerFolder(root)
+  }
+  Component.onDestruction: {
+    if (folderService) folderService.unregisterFolder(root)
   }
 
   function memberLoader(pluginId) {
@@ -40,6 +65,13 @@ BarWidget {
       if (loader && loader.pluginId === String(pluginId)) return loader
     }
     return null
+  }
+
+  function unavailableMembers() {
+    return (folderData.members || []).filter(function(member) {
+      var loader = root.memberLoader(String(member.id))
+      return !loader || !loader.item
+    }).map(function(member) { return String(member.id) })
   }
 
   function pressTarget(item, depth) {
@@ -195,7 +227,7 @@ BarWidget {
 
       function injectMember() {
         if (!item) return
-        if ("bar" in item) item.bar = root.bar
+        if ("bar" in item) item.bar = root.memberBar(pluginId)
         if ("moduleName" in item) item.moduleName = pluginId
         if ("settings" in item)
           item.settings = modelData.entry && typeof modelData.entry === "object"
@@ -207,6 +239,11 @@ BarWidget {
         root.memberRevision++
       }
       onModelDataChanged: injectMember()
+      Connections {
+        target: root
+        function onBarChanged() { injectMember() }
+        function onNativeBarChanged() { injectMember() }
+      }
     }
   }
 
