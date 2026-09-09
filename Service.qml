@@ -5,16 +5,23 @@ Item {
   id: root
 
   property var shell: null
+  property var barWidgetRegistry: null
+  property var folderWidgets: []
   readonly property string pluginId: "io.github.dlpwaters.plugin-folders"
 
+  function registerFolder(widget) {
+    if (folderWidgets.indexOf(widget) < 0) folderWidgets = folderWidgets.concat([widget])
+  }
+
+  function unregisterFolder(widget) {
+    folderWidgets = folderWidgets.filter(function(item) { return item && item !== widget })
+  }
+
   function folderWidget(folderId) {
-    var bar = shell ? shell.bar : null
-    var slots = bar && Array.isArray(bar.moduleSlots) ? bar.moduleSlots : []
     var requested = String(folderId || "")
-    for (var i = 0; i < slots.length; i++) {
-      var slot = slots[i]
-      var item = slot ? slot.activeItem : null
-      if (!item || slot.moduleName !== pluginId) continue
+    for (var i = 0; i < folderWidgets.length; i++) {
+      var item = folderWidgets[i]
+      if (!item) continue
       if (requested === "" || String(item.folderId || "") === requested) return item
     }
     return null
@@ -65,6 +72,7 @@ Item {
         name: String(item.folderData && item.folderData.name || ""),
         members: item.folderData && Array.isArray(item.folderData.members)
           ? item.folderData.members.length : 0,
+        unavailableMembers: item.unavailableMembers(),
         opened: item.opened === true,
         query: String(item.launcherQuery || ""),
         visibleMembers: Number(item.launcherVisibleCount || 0),
